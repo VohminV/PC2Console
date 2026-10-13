@@ -19,6 +19,9 @@
 #include "pc2c/core/Hash.h"
 #include "pc2c/core/Json.h"
 #include "pc2c/discovery/Scanner.h"
+#include "pc2c/engines/Torque.h"
+#include "pc2c/formats/Registry.h"
+#include "pc2c/graph/Deps.h"
 #include "pc2c/input/Analyze.h"
 #include "pc2c/input/Diagnostics.h"
 #include "pc2c/input/Manager.h"
@@ -860,6 +863,76 @@ int RunAllTests(bool verbose) {
       check(g2.active == 0 && g2.drafts >= 1, "ts-gen-key-axis-draft");
       check(!input::parseTsConfig("moveMap.bindCmd(keyboard, \"a\");\n", binds, err).ok,
             "ts-parse-bad-rejected", err);
+    }
+  }
+
+  // 20. Universal framework: FormatRegistry + TorqueAdapter + DependencyGraph.
+  {
+    // 20a. Registry honesty: BMP/TGA convert=true, PNG/DDS convert=false.
+    {
+      auto reg = formats::builtinFormats();
+      const formats::FormatInfo* bmp = formats::findByExtension(reg, ".bmp");
+      const formats::FormatInfo* png = formats::findByExtension(reg, ".png");
+      const formats::FormatInfo* dts = formats::findByExtension(reg, ".dts");
+      const formats::FormatInfo* cs = formats::findByExtension(reg, ".cs");
+      check(bmp && bmp->status == "supported" && bmp->caps.convert, "reg-bmp-supported");
+      check(png && png->status == "unsupported" && !png->caps.convert, "reg-png-honest");
+      check(dts && dts->status == "unsupported" && dts->caps.detect && !dts->caps.extract,
+            "reg-dts-detect-only");
+      check(cs && cs->status == "supported" && cs->caps.extract && !cs->caps.convert,
+            "reg-torque-text-extract");
+      check(formats::findByExtension(reg, ".nope") == nullptr, "reg-unknown-null");
+      check(formats::findByMagic(reg, "BMP") == bmp, "reg-magic-bmp");
+      json::Value j = formats::registryToJson(reg);
+      check(j.find("formats") != nullptr, "reg-json");
+    }
+    // 20b. Torque adapter: exec + ref-ext extraction, no fake decode.
+    {
+      std::string t =
+          "exec(\"./common/main.cs\");\n"
+          "new GuiControl(loadingGui) { profile = \"GuiDefaultProfile\"; };\n"
+          "shapeFile = \"art/shapes/player/player.dts\";\n"
+          "skin = \"art/skins/hunter_texture_SPRING.jpg\";\n"
+          "sound = \"art/sound/fire.ogg\";\n";
+      auto refs = engines::torque::extractRefs(t);
+      bool hasExec = false, hasDts = false, hasJpg = false, hasOgg = false;
+      for (const auto& r : refs) {
+        if (r.target == "./common/main.cs" && r.basis == "exec") hasExec = true;
+        if (r.target.find("player.dts") != std::string::npos) hasDts = true;
+        if (r.target.find(".jpg") != std::string::npos) hasJpg = true;
+        if (r.target.find(".ogg") != std::string::npos) hasOgg = true;
+      }
+      check(hasExec && hasDts && hasJpg && hasOgg, "torque-refs-real",
+            std::to_string(refs.size()));
+      check(engines::torque::isTorqueText(".cs") && engines::torque::isTorqueText(".mis") &&
+                !engines::torque::isTorqueText(".dts"),
+            "torque-text-gate");
+      auto v = engines::torque::detect({"torque-candidate:a.dso", "torque-candidate:b.mis",
+                                        "torque-candidate:c.ter"});
+      check(v.engine == "torque?", "torque-detect");
+    }
+    // 20c. DependencyGraph on synthetic Torque game: resolves + keeps unresolved honest.
+    {
+      auto root = tmpRoot() / "graph-game";
+      std::error_code ec;
+      std::filesystem::create_directories(root / "art", ec);
+      std::ofstream(root / "main.cs") << "exec(\"./art/a.cs\");\n";
+      std::ofstream(root / "art/a.cs")
+          << "shapeFile = \"art/player.dts\";\nmissing = \"art/gone.png\";\n";
+      std::ofstream(root / "art/player.dts", std::ios::binary) << "DTS-BIN";
+      Limits lim;
+      discovery::ScanResult scan = discovery::scanGameDir(root.string(), lim);
+      analysis::Inventory inv = analysis::buildInventory(root.string(), scan, 1ULL << 20);
+      graph::Graph g = graph::buildGraph(root.string(), scan, inv, lim);
+      check(g.textFiles == 2, "graph-text-count", std::to_string(g.textFiles));
+      check(g.resolved >= 2, "graph-resolved", std::to_string(g.resolved));
+      check(g.unresolved >= 1, "graph-unresolved-honest", std::to_string(g.unresolved));
+      bool foundUnres = false;
+      for (const auto& e : g.edges)
+        if (!e.resolved && e.to.find("gone.png") != std::string::npos) foundUnres = true;
+      check(foundUnres, "graph-unresolved-kept");
+      json::Value j = graph::graphToJson(g);
+      check(j.find("edges") != nullptr, "graph-json");
     }
   }
 

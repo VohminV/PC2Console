@@ -43,6 +43,9 @@ set(PC2C_LIB_SOURCES
   src/backends/Backend.cpp
   src/backends/Targets.cpp
   src/shaders/ShaderConvert.cpp
+  src/formats/Registry.cpp
+  src/engines/Torque.cpp
+  src/graph/Deps.cpp
   src/cli/App.cpp
   src/test/Suite.cpp
 )

@@ -15,6 +15,9 @@
 #include "pc2c/core/Hash.h"
 #include "pc2c/core/Logger.h"
 #include "pc2c/discovery/Scanner.h"
+#include "pc2c/engines/Torque.h"
+#include "pc2c/formats/Registry.h"
+#include "pc2c/graph/Deps.h"
 #include "pc2c/input/Analyze.h"
 #include "pc2c/input/Diagnostics.h"
 #include "pc2c/input/Manager.h"
@@ -55,6 +58,8 @@ void usage() {
                "  pc2c input torquescript <config.cs> --output <gamepad.cs> [--bind fn=CTRL ...]\n"
                "  pc2c shaders convert <dir> --output <dir> [--profile sm1|sm2|sm3]\n"
                "       [--overwrite] [--dry-run] [--format json]\n"
+               "  pc2c formats list [--format json]\n"
+               "  pc2c graph <game_dir> [--output file.json] [--format json]\n"
                "  pc2c test [--verbose]\n"
                "\nGlobal flags: --input --output --target --profile --max-texture-size\n"
                "  --dry-run --overwrite --verbose --format text|json\n"
@@ -167,6 +172,8 @@ Parsed parseArgs(const std::vector<std::string>& a) {
     } else if (p.cmd == "shaders" && p.sub.empty()) {
       p.sub = t;
     } else if (p.cmd == "backends" && p.sub.empty()) {
+      p.sub = t;
+    } else if (p.cmd == "formats" && p.sub.empty()) {
       p.sub = t;
     } else {
       p.positionals.push_back(t);
@@ -936,6 +943,55 @@ int cmdInput(const Parsed& p, const Limits& lim) {
   return 1;
 }
 
+int cmdFormats(const Parsed& p) {
+  if (p.sub != "list") {
+    std::cerr << "error: usage: pc2c formats list\n";
+    return 1;
+  }
+  auto reg = pc2c::formats::builtinFormats();
+  if (p.opts.format == "json") return emitJson(pc2c::formats::registryToJson(reg), p.opts.output);
+  std::size_t sup = 0, uns = 0;
+  for (const auto& f : reg) {
+    if (f.status == "supported")
+      sup++;
+    else
+      uns++;
+  }
+  std::cout << "formats: " << reg.size() << " supported=" << sup << " unsupported=" << uns << "\n";
+  for (const auto& f : reg)
+    std::cout << "  " << f.id << " [" << f.status << "] " << f.kind << " caps d/v/x/c/r="
+              << f.caps.detect << "/" << f.caps.validate << "/" << f.caps.extract << "/"
+              << f.caps.convert << "/" << f.caps.repack << " -- " << f.note << "\n";
+  if (!p.opts.output.empty()) return emitJson(pc2c::formats::registryToJson(reg), p.opts.output);
+  return 0;
+}
+
+int cmdGraph(const Parsed& p, const Limits& lim) {
+  std::string dir = positionalOrInput(p);
+  if (dir.empty()) {
+    std::cerr << "error: usage: pc2c graph <game_dir> [--output file.json]\n";
+    return 1;
+  }
+  auto scan = doScan(dir, lim);
+  auto inv = pc2c::analysis::buildInventory(dir, scan, lim.maxFileBytes);
+  auto g = pc2c::graph::buildGraph(dir, scan, inv, lim);
+  if (p.opts.format == "json" || !p.opts.output.empty())
+    return emitJson(pc2c::graph::graphToJson(g), p.opts.output);
+  std::cout << "nodes=" << g.nodes.size() << " edges=" << g.edges.size()
+            << " text_files=" << g.textFiles << " resolved=" << g.resolved
+            << " unresolved=" << g.unresolved << "\n";
+  const std::size_t show = std::min<std::size_t>(g.edges.size(), 20);
+  for (std::size_t i = 0; i < show; ++i) {
+    const auto& e = g.edges[i];
+    std::cout << "  " << e.from << ":" << e.line << " -> " << e.to
+              << (e.resolved ? " [resolved]" : " [UNRESOLVED]") << "\n";
+  }
+  if (g.edges.size() > show)
+    std::cout << "  ... (" << (g.edges.size() - show) << " more)\n";
+  for (const auto& w : g.warnings) std::cout << "warn: " << w << "\n";
+  return 0;
+}
+
 }  // namespace
 
 int Pc2cMain(const std::vector<std::string>& args) {
@@ -959,6 +1015,8 @@ int Pc2cMain(const std::vector<std::string>& args) {
   if (p.cmd == "assets") return cmdAssets(p, lim);
   if (p.cmd == "input") return cmdInput(p, lim);
   if (p.cmd == "shaders") return cmdShaders(p, lim);
+  if (p.cmd == "formats") return cmdFormats(p);
+  if (p.cmd == "graph") return cmdGraph(p, lim);
   if (p.cmd == "plan") return cmdPlan(p, lim);
   if (p.cmd == "build") return cmdBuild(p);
   if (p.cmd == "report") return cmdReport(p, lim);
