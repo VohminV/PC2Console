@@ -43,15 +43,40 @@ pc2c test [--verbose]
 (+RLE); PNG/JPEG/DDS — детект без конвертации (честно). Безопасность: входы не
 изменяются и не запускаются; запись атомарная; `--overwrite` required.
 
+## CLI (ввод — подсистема Controller Compatibility)
+
+```bat
+pc2c input backends
+pc2c input diag [--user N] [--seconds S] [--rumble-test] [--format json]
+pc2c input analyze <dir> [--format json]
+pc2c input profile validate <file>
+pc2c input profile make-default --output <file> [--target xbox360]
+```
+
+Настольный backend читает XInput-геймпад (динамически, без жёсткой связи);
+консольный backend — только XDK API (проверен компиляцией XDK cl).
+Матрица «что где протестировано»: `docs/CONTROLLER.md`.
+
 ## Статус окружения (проверено 2026-10-13)
 
 XDK 21256 полный (`%XEDK%`, `_XDK_VER=21256`, cl/link 10.00.11886, imagexex,
-fxc, 306 заголовков, 134 библиотеки, VS2010, сэмплы). Backend заявляет
-`ready=false` до прохождения Phase 5 (реальная сборка минимального сэмпла).
+fxc, 306 заголовков, 134 библиотеки, VS2010, сэмплы). Phase 5 DONE:
+`samples/xbox360/minplay` собирается, упаковывается и запускается.
 Подробности: `docs/XBOX360_SDK.md`, `docs/RESEARCH.md`.
+
+## Играть на Xbox 360 (minplay — proof of backend)
+
+```bat
+build\pc2c.exe build samples\xbox360\minplay --target xbox360
+xenia.exe samples\xbox360\minplay\Release\minplay.xex
+```
+
+Стик — движение, A — очко + вибрация, START — выход. Xenia: официальный
+`xenia-project/release-builds-windows` (`xenia_master.zip`); нужен D3D12-GPU.
+На физической консоли: `xbcp` + запуск (нужен devkit).
 
 ## Документация
 
 `ARCHITECTURE.md` · `RESEARCH.md` · `SUPPORTED_FORMATS.md` · `XBOX360_SDK.md` ·
 `XBOX360_BACKEND.md` · `PS3_BACKEND.md` · `PORTING_LIMITATIONS.md` ·
-`SECURITY.md` · `TEST_PLAN.md` · `ROADMAP.md`
+`SECURITY.md` · `TEST_PLAN.md` · `ROADMAP.md` · `CONTROLLER.md`

@@ -15,6 +15,12 @@
 #include "pc2c/core/Hash.h"
 #include "pc2c/core/Logger.h"
 #include "pc2c/discovery/Scanner.h"
+#include "pc2c/input/Analyze.h"
+#include "pc2c/input/Diagnostics.h"
+#include "pc2c/input/Manager.h"
+#include "pc2c/input/Profiles.h"
+#include "pc2c/input/WindowsBackend.h"
+#include "pc2c/input/Xbox360Backend.h"
 #include "pc2c/intermediate/Model.h"
 #include "pc2c/portability/Plan.h"
 #include "pc2c/test/Suite.h"
@@ -40,6 +46,10 @@ void usage() {
                "  pc2c plan <game_dir> --target xbox360|ps3 [--output file.json] [--format json]\n"
                "  pc2c build <project_dir> --target xbox360|ps3 [--dry-run]\n"
                "  pc2c report <game_dir> [--target xbox360] [--output file.json]\n"
+               "  pc2c input backends\n"
+               "  pc2c input diag [--user N] [--seconds S] [--rumble-test] [--format json]\n"
+               "  pc2c input analyze <dir> [--format json] [--output file.json]\n"
+               "  pc2c input profile validate <file> | make-default --output <file>\n"
                "  pc2c test [--verbose]\n"
                "\nGlobal flags: --input --output --target --profile --max-texture-size\n"
                "  --dry-run --overwrite --verbose --format text|json\n"
@@ -53,6 +63,9 @@ struct Parsed {
   std::string cmd, sub;
   std::vector<std::string> positionals;
   GlobalOptions opts;
+  int inputUser = 0;
+  double inputSeconds = 5.0;
+  bool inputRumbleTest = false;
   bool help = false;
   std::string error;
 };
@@ -85,6 +98,30 @@ Parsed parseArgs(const std::vector<std::string>& a) {
       p.opts.verbose = true;
     } else if (t == "--probe-tools") {
       p.opts.probeTools = true;
+    } else if (t == "--rumble-test") {
+      p.inputRumbleTest = true;
+    } else if (t.rfind("--user", 0) == 0) {
+      std::string v;
+      if (!needVal(t, v)) return p;
+      try {
+        p.inputUser = std::stoi(v);
+      } catch (...) {
+        p.error = "bad --user: " + v;
+        return p;
+      }
+    } else if (t.rfind("--seconds", 0) == 0) {
+      std::string v;
+      if (!needVal(t, v)) return p;
+      try {
+        p.inputSeconds = std::stod(v);
+      } catch (...) {
+        p.error = "bad --seconds: " + v;
+        return p;
+      }
+      if (p.inputSeconds <= 0 || p.inputSeconds > 120) {
+        p.error = "bad --seconds (0..120): " + v;
+        return p;
+      }
     } else if (t.rfind("--input", 0) == 0) {
       if (!needVal(t, p.opts.input)) return p;
     } else if (t.rfind("--output", 0) == 0) {
@@ -114,6 +151,8 @@ Parsed parseArgs(const std::vector<std::string>& a) {
     } else if (p.cmd.empty()) {
       p.cmd = t;
     } else if (p.cmd == "assets" && p.sub.empty()) {
+      p.sub = t;
+    } else if (p.cmd == "input" && p.sub.empty()) {
       p.sub = t;
     } else if (p.cmd == "backends" && p.sub.empty()) {
       p.sub = t;
@@ -605,7 +644,23 @@ int cmdBuild(const Parsed& p) {
   pc2c::json::Value o;
   xb.planBuild(dir, o);
   o.set("dry_run", pc2c::json::Value::Bool(p.opts.dryRun));
+  // If the project dir is an Xbox 360 sample, perform a REAL rebuild with the
+  // VS2010+XDK toolchain (explicit user request => known MS binaries may run).
+  pc2c::build::SampleBuild sb = pc2c::build::buildXboxSample(dir, p.opts.dryRun);
+  o.set("sample_build", pc2c::build::sampleBuildToJson(sb));
   std::cout << o.dump(2);
+  if (sb.isSample) {
+    if (p.opts.dryRun) {
+      std::cout << "dry-run: sample build command above was NOT executed.\n";
+      return 0;
+    }
+    if (sb.ok) {
+      std::cout << "sample rebuilt OK: " << sb.xexPath << " (XEX2 verified)\n";
+      return 0;
+    }
+    std::cerr << "sample build FAILED: " << sb.error << "\n";
+    return 1;
+  }
   std::cout << "note: backend ready=false until a minimal XDK sample compiles, links, packages "
                "and is verified (Phase 5). No XEX was produced by this command.\n";
   return 0;
@@ -620,6 +675,170 @@ int cmdReport(const Parsed& p, const Limits& lim) {
   std::string tgt = p.opts.target.empty() ? "xbox360" : p.opts.target;
   auto m = buildModel(dir, tgt, lim);
   return emitJson(m.toJson(), p.opts.output);
+}
+
+int cmdInput(const Parsed& p, const Limits& lim) {
+  using namespace pc2c;
+  using namespace pc2c::input;
+  if (p.sub == "backends") {
+    json::Value o = json::Value::Obj();
+    std::string note;
+    auto win = createWindowsBackend(note);
+    json::Value w = json::Value::Obj();
+    if (win) {
+      BackendCaps c = win->caps();
+      w.set("available", json::Value::Bool(true));
+      w.set("name", json::Value::Str(c.backend));
+      w.set("max_controllers", json::Value::Int(c.maxControllers));
+      w.set("analog_triggers", json::Value::Bool(c.analogTriggers));
+      w.set("rumble", json::Value::Bool(c.hasRumble));
+      w.set("detail", json::Value::Str(c.detail));
+    } else {
+      w.set("available", json::Value::Bool(false));
+      w.set("reason", json::Value::Str(note));
+    }
+    o.set("windows", std::move(w));
+    json::Value x = json::Value::Obj();
+#ifdef _XBOX
+    auto xb = createXbox360Backend();
+    x.set("available", json::Value::Bool(xb != nullptr));
+#else
+    x.set("available", json::Value::Bool(false));
+    x.set("reason",
+          json::Value::Str("xbox360 backend compiles only under the XDK toolchain "
+                           "(src/input/xbox360/Xbox360Backend.cpp); confirmed API: "
+                           "XInputGetState/SetState, XINPUT_STATE, ERROR_DEVICE_NOT_CONNECTED"));
+#endif
+    o.set("xbox360", std::move(x));
+    o.set("note", json::Value::Str("desktop and console are independent implementations "
+                                   "of IInputBackend; no shared platform code"));
+    if (p.opts.format == "json") return emitJson(o, p.opts.output);
+    const json::Value* ww = o.find("windows");
+    const json::Value* xx = o.find("xbox360");
+    std::cout << "windows-xinput: "
+              << (ww && ww->find("available") && std::get<bool>(ww->find("available")->v)
+                      ? "available"
+                      : "UNAVAILABLE")
+              << "\n";
+    if (ww) {
+      const json::Value* d = ww->find("detail");
+      const json::Value* r = ww->find("reason");
+      if (d) std::cout << "  " << std::get<std::string>(d->v) << "\n";
+      if (r) std::cout << "  " << std::get<std::string>(r->v) << "\n";
+    }
+    std::cout << "xbox360-xinput: "
+              << (xx && xx->find("available") && std::get<bool>(xx->find("available")->v)
+                      ? "available (console build)"
+                      : "host-unavailable (XDK-only TU, by design)")
+              << "\n";
+    return 0;
+  }
+  if (p.sub == "diag") {
+    std::string note;
+    auto backend = createWindowsBackend(note);
+    if (!backend) {
+      std::cerr << "error: windows input backend unavailable: " << note << "\n";
+      return 1;
+    }
+    InputProfile prof = InputProfile::makeDefault("pc");
+    ControllerManager mgr(std::move(backend), prof, p.inputUser);
+    DiagOptions d;
+    d.userIndex = p.inputUser;
+    d.seconds = p.inputSeconds;
+    d.rumbleTest = p.inputRumbleTest;
+    std::cout << "sampling input " << d.seconds << "s (move sticks, press buttons)...\n";
+    DiagReport rep = runDiagnostics(mgr, d);
+    if (p.opts.format == "json") return emitJson(rep.toJson(), p.opts.output);
+    std::cout << "backend=" << rep.backend << " tested_on=" << rep.testedOn << "\n";
+    std::cout << "frames=" << rep.frames << " poll_hz=" << rep.pollHz
+              << " ever_connected=" << (rep.everConnected ? "yes" : "NO") << "\n";
+    if (!rep.everConnected)
+      std::cout << "no controller attached: connect a pad and rerun (reconnect is tracked)\n";
+    std::cout << "lx " << rep.minLX << ".." << rep.maxLX << " ly " << rep.minLY << ".." << rep.maxLY
+              << " lt_max " << (int)rep.maxLT << " rt_max " << (int)rep.maxRT << "\n";
+    std::cout << rep.asciiPlot;
+    std::cout << "buttons_seen:";
+    for (const auto& b : rep.buttonsSeen) std::cout << " " << b;
+    std::cout << "\nrumble=" << rep.rumbleResult << " raw: " << rep.rawNote << "\n";
+    if (!p.opts.output.empty()) return emitJson(rep.toJson(), p.opts.output);
+    return 0;
+  }
+  if (p.sub == "analyze") {
+    std::string dir = positionalOrInput(p);
+    if (dir.empty()) {
+      std::cerr << "error: usage: pc2c input analyze <dir>\n";
+      return 1;
+    }
+    auto scan = doScan(dir, lim);
+    auto pes = doPe(dir, scan, lim);
+    InputAnalysis a = analyzeInput(dir, scan, pes, lim);
+    if (p.opts.format == "json" || !p.opts.output.empty())
+      return emitJson(a.toJson(), p.opts.output);
+    std::cout << "has_sources=" << (a.hasSources ? "yes" : "no")
+              << " findings=" << a.findings.size() << "\n";
+    for (const auto& f : a.findings)
+      std::cout << "  [" << f.system << "/" << f.confidence << "] " << f.evidence << "\n";
+    std::cout << "verdict: " << a.mechanismVerdict << "\n";
+    return 0;
+  }
+  if (p.sub == "profile") {
+    if (p.positionals.empty()) {
+      std::cerr << "error: usage: pc2c input profile validate <file> | make-default --output "
+                   "<file>\n";
+      return 1;
+    }
+    if (p.positionals[0] == "validate") {
+      std::string file = p.positionals.size() > 1 ? p.positionals[1] : p.opts.input;
+      if (file.empty()) {
+        std::cerr << "error: usage: pc2c input profile validate <file>\n";
+        return 1;
+      }
+      InputProfile prof;
+      std::string err;
+      if (!prof.loadFile(file, err).ok) {
+        std::cerr << "error: " << err << "\n";
+        return 1;
+      }
+      auto issues = prof.validate();
+      json::Value o = json::Value::Obj();
+      o.set("file", json::Value::Str(file));
+      o.set("version", json::Value::Int(prof.version));
+      o.set("actions", json::Value::Int(prof.mapping.bindings().size()));
+      json::Value::Array ia;
+      for (const auto& i : issues) {
+        json::Value e = json::Value::Obj();
+        e.set("severity", json::Value::Str(i.severity));
+        e.set("message", json::Value::Str(i.message));
+        ia.push_back(std::move(e));
+      }
+      o.set("issues", json::Value::Arr(std::move(ia)));
+      if (p.opts.format == "json") return emitJson(o, p.opts.output);
+      std::cout << "profile ok: version=" << prof.version
+                << " actions=" << prof.mapping.bindings().size() << "\n";
+      for (const auto& i : issues) std::cout << "  [" << i.severity << "] " << i.message << "\n";
+      return 0;
+    }
+    if (p.positionals[0] == "make-default") {
+      if (p.opts.output.empty()) {
+        std::cerr << "error: usage: pc2c input profile make-default --output <file>\n";
+        return 1;
+      }
+      std::string tgt = p.opts.target.empty() ? "xbox360" : p.opts.target;
+      InputProfile prof = InputProfile::makeDefault(tgt);
+      Status st = prof.saveFile(p.opts.output);
+      if (!st.ok) {
+        std::cerr << "error: " << st.message << "\n";
+        return 1;
+      }
+      std::cout << "wrote default profile (" << tgt << "): " << p.opts.output << "\n";
+      return 0;
+    }
+    std::cerr << "error: unknown profile action '" << p.positionals[0] << "'\n";
+    return 1;
+  }
+  std::cerr << "error: unknown input subcommand '" << p.sub
+            << "' (backends|diag|analyze|profile)\n";
+  return 1;
 }
 
 }  // namespace
@@ -643,6 +862,7 @@ int Pc2cMain(const std::vector<std::string>& args) {
   if (p.cmd == "analyze") return cmdAnalyze(p, lim);
   if (p.cmd == "inventory") return cmdInventory(p, lim);
   if (p.cmd == "assets") return cmdAssets(p, lim);
+  if (p.cmd == "input") return cmdInput(p, lim);
   if (p.cmd == "plan") return cmdPlan(p, lim);
   if (p.cmd == "build") return cmdBuild(p);
   if (p.cmd == "report") return cmdReport(p, lim);

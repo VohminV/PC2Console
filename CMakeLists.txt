@@ -28,6 +28,15 @@ set(PC2C_LIB_SOURCES
   src/assets/Converter.cpp
   src/portability/ApiDb.cpp
   src/portability/Plan.cpp
+  src/input/Types.cpp
+  src/input/Axis.cpp
+  src/input/Mapping.cpp
+  src/input/Profiles.cpp
+  src/input/Rumble.cpp
+  src/input/Manager.cpp
+  src/input/Diagnostics.cpp
+  src/input/Analyze.cpp
+  src/input/backends/WindowsBackend.cpp
   src/intermediate/Model.cpp
   src/build/Toolchain.cpp
   src/backends/Backend.cpp

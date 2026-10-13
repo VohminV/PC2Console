@@ -47,6 +47,8 @@ std::string archName(std::uint16_t m) {
       return "ppc";
     case 0x01f1:
       return "ppc64";
+    case 0x01f2:
+      return "xbox360";  // verified: XDK 21256 link emits 0x01F2 for Xbox 360 target
     case 0x0169:
       return "mips16?legacy";
     default: {

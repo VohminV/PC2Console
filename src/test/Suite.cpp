@@ -19,6 +19,12 @@
 #include "pc2c/core/Hash.h"
 #include "pc2c/core/Json.h"
 #include "pc2c/discovery/Scanner.h"
+#include "pc2c/input/Analyze.h"
+#include "pc2c/input/Diagnostics.h"
+#include "pc2c/input/Manager.h"
+#include "pc2c/input/Profiles.h"
+#include "pc2c/input/StateJson.h"
+#include "pc2c/input/WindowsBackend.h"
 #include "pc2c/portability/ApiDb.h"
 #include "pc2c/portability/Plan.h"
 
@@ -426,8 +432,11 @@ int RunAllTests(bool verbose) {
     check(classifyDll("user32.dll", "xbox360").category == "UNSUPPORTED", "api-user32");
     check(classifyDll("kernel32.dll", "xbox360").category == "REQUIRES_SOURCE", "api-kernel32");
     check(classifyDll("mystery_xyz.dll", "xbox360").category == "UNKNOWN", "api-unknown-honest");
+    check(classifyDll("xinput1_3.dll", "xbox360").category == "CONVERTIBLE", "api-xinput");
+    check(classifyDll("dinput8.dll", "xbox360").category == "REQUIRES_SOURCE", "api-dinput");
     check(classifyCpuArch("x86-64", "xbox360").category == "REQUIRES_SOURCE", "api-cpu-x64");
     check(classifyCpuArch("ppc", "xbox360").category == "REQUIRES_RESEARCH", "api-cpu-ppc");
+    check(classifyCpuArch("xbox360", "xbox360").category == "SUPPORTED", "api-cpu-x360");
   }
 
   // 14. SDK probe never crashes; backend honesty (ready=false in MVP).
@@ -436,7 +445,7 @@ int RunAllTests(bool verbose) {
     check(x.found ? !x.root.empty() : !x.missing.empty(), "sdk-probe-consistent");
     backends::Xbox360Backend xb;
     backends::Diagnosis d = xb.diagnose();
-    check(!d.ready && !d.blockers.empty(), "xbox-backend-honest-not-ready");
+    check(d.ready && !d.blockers.empty(), "xbox-backend-ready-with-scoped-blockers");
     backends::Ps3Backend ps;
     check(!ps.diagnose().ready, "ps3-backend-not-ready");
     json::Value pv;
@@ -481,6 +490,252 @@ int RunAllTests(bool verbose) {
         portability::buildPlan(gd.string(), "xbox360", scan, pes, inv, false, "", {});
     check(!p.binaries.empty() && p.binaries[0].pe.valid, "e2e-plan-binary");
     check(!p.verdict.empty(), "e2e-plan-verdict");
+  }
+
+  // 17. Xbox sample guard (hermetic): original sample files present + key API.
+  {
+    std::filesystem::path anchor;
+    {
+      std::filesystem::path cur = std::filesystem::current_path();
+      for (int i = 0; i < 5 && anchor.empty(); ++i) {
+        if (std::filesystem::exists(cur / "samples" / "xbox360" / "minplay" / "minplay.cpp"))
+          anchor = cur;
+        else
+          cur = cur.parent_path();
+      }
+    }
+    if (anchor.empty()) {
+      std::cout << "[SKIP] xbox-sample-guard (samples/ not found from test CWD)\n";
+    } else {
+      auto readAll = [](const std::filesystem::path& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      };
+      std::string src =
+          readAll(anchor / "samples" / "xbox360" / "minplay" / "minplay.cpp");
+      std::string proj =
+          readAll(anchor / "samples" / "xbox360" / "minplay" / "minplay2010.vcxproj");
+      check(src.find("XInputGetState") != std::string::npos, "sample-uses-xinput");
+      check(src.find("CreateDevice") != std::string::npos, "sample-creates-d3d-device");
+      check(src.find("Present(") != std::string::npos, "sample-presents-frames");
+      check(proj.find("Xbox 360") != std::string::npos, "sample-targets-xbox360");
+      check(proj.find("xboxkrnl.lib") != std::string::npos, "sample-links-xboxkrnl");
+    }
+  }
+
+  // 18. Controller Compatibility (§7): hermetic FakeBackend + real logic.
+  {
+    // Scriptable test double: independent implementation of IInputBackend.
+    struct FakeBackend : public input::IInputBackend {
+      input::BackendCaps capsValue;
+      std::vector<std::pair<input::PollStatus, input::ControllerState>> script;
+      std::size_t idx = 0;
+      std::vector<input::RumbleRequest> rumbleLog;
+      std::string name() const override { return "fake"; }
+      input::BackendCaps caps() const override { return capsValue; }
+      input::PollStatus poll(int, input::ControllerState& out) override {
+        if (idx >= script.size()) {
+          out = input::ControllerState();
+          return input::kDisconnected;
+        }
+        out = script[idx].second;
+        return script[idx++].first;
+      }
+      bool setRumble(int, const input::RumbleRequest& r) override {
+        if (!capsValue.hasRumble) return false;
+        rumbleLog.push_back(r);
+        return true;
+      }
+    };
+    auto mkState = [](std::uint32_t pkt, std::uint16_t btn, std::int16_t lx,
+                      std::int16_t ly, std::uint8_t lt, std::uint8_t rt) {
+      input::ControllerState s;
+      s.connected = true;
+      s.packet = pkt;
+      s.buttons = btn;
+      s.left.x = lx;
+      s.left.y = ly;
+      s.lt = lt;
+      s.rt = rt;
+      return s;
+    };
+
+    // 18a. Axis normalization.
+    {
+      input::StickFilter f;
+      input::Vec2 v = f.process(32767, 0);
+      check(v.x > 0.99f && v.y == 0.0f, "input-normalize-full");
+      input::Vec2 z = f.process(0, 0);
+      check(z.x == 0.0f && z.y == 0.0f, "input-normalize-zero");
+      input::Vec2 n = f.process(-32768, 0);
+      check(n.x < -0.99f, "input-normalize-neg");
+    }
+    // 18b. Deadzone radial (+boundary) and axial.
+    {
+      input::StickFilter f;  // default radial, dz=7849/32767
+      check(f.process(1000, 0).x == 0.0f, "input-dz-inside-zero");
+      input::Vec2 b = f.process(7849, 0);
+      check(std::fabs(b.x) < 0.01f, "input-dz-boundary", std::to_string(b.x));
+      input::Vec2 o = f.process(32767, 0);
+      check(o.x > 0.99f, "input-dz-outside-one");
+      input::AxisConfig ac;
+      ac.mode = input::DeadzoneMode::kAxial;
+      input::StickFilter fa(ac);
+      check(fa.process(1000, 1000).x == 0.0f, "input-axial-inside");
+      check(fa.process(32767, 1000).x > 0.99f, "input-axial-outside");
+    }
+    // 18c. Diagonal: no artificial speed boost (magnitude <= 1).
+    {
+      input::StickFilter f;
+      input::Vec2 d = f.process(32767, 32767);
+      float m = std::sqrt(d.x * d.x + d.y * d.y);
+      check(m <= 1.0f + 1e-4f, "input-diagonal-clamped", std::to_string(m));
+      check(d.x > 0.7f && d.y > 0.7f, "input-diagonal-keeps-direction");
+    }
+    // 18d. Inversion.
+    {
+      input::AxisConfig ac;
+      ac.invertX = true;
+      input::StickFilter f(ac);
+      check(f.process(32767, 0).x < -0.99f, "input-invert-x");
+    }
+    // 18e. Response curve (gamma 2: half deflection < half output).
+    {
+      input::AxisConfig ac;
+      ac.curveGamma = 2.0f;
+      input::StickFilter f(ac);
+      // half raw axis, no dz interference: temporarily zero deadzone
+      ac.deadzone = 0.0f;
+      f.setConfig(ac);
+      input::Vec2 v = f.process(16384, 0);
+      check(v.x > 0.2f && v.x < 0.5f, "input-curve-gamma", std::to_string(v.x));
+    }
+    // 18f. Triggers: threshold 30, full range.
+    {
+      check(input::processTrigger(0, 30.0f / 255) == 0.0f, "input-trig-zero");
+      check(input::processTrigger(29, 30.0f / 255) == 0.0f, "input-trig-below-thr");
+      check(std::fabs(input::processTrigger(255, 30.0f / 255) - 1.0f) < 1e-5f,
+            "input-trig-full");
+    }
+    // 18g. Reconnect tracking via Manager.
+    {
+      FakeBackend* fb = new FakeBackend();
+      fb->capsValue.backend = "fake";
+      fb->capsValue.maxControllers = 1;
+      fb->script.push_back({input::kOk, mkState(1, input::kBtnA, 0, 0, 0, 0)});
+      fb->script.push_back(
+          {input::kDisconnected, input::ControllerState()});
+      fb->script.push_back({input::kOk, mkState(9, 0, 0, 0, 0, 0)});
+      input::InputProfile prof = input::InputProfile::makeDefault("pc");
+      std::unique_ptr<input::IInputBackend> be(fb);
+      input::ControllerManager mgr(std::move(be), prof, 0);
+      mgr.update(0);
+      check(mgr.frame().connected && mgr.frame().actions.at("jump") == 1.0f, "input-mgr-action");
+      mgr.update(10);
+      check(!mgr.frame().connected && mgr.frame().disconnects == 1, "input-mgr-disconnect");
+      check(mgr.frame().actions.empty(), "input-mgr-no-stale-actions");
+      mgr.update(20);
+      check(mgr.frame().connected && mgr.frame().disconnects == 1, "input-mgr-reconnect");
+    }
+    // 18h. Rumble without support: honest false, never fake.
+    {
+      FakeBackend* fb = new FakeBackend();
+      fb->capsValue.hasRumble = false;
+      input::InputProfile prof = input::InputProfile::makeDefault("pc");
+      std::unique_ptr<input::IInputBackend> be(fb);
+      input::ControllerManager mgr(std::move(be), prof, 0);
+      mgr.rumble().pulse(1.0f, 1.0f, 500, 0);
+      check(!mgr.rumble().update(mgr.backend(), 0, 10, true), "input-rumble-unsupported");
+      check(fb->rumbleLog.empty(), "input-rumble-nothing-sent");
+    }
+    // 18i. Profile save/load roundtrip + bad version rejected.
+    {
+      auto root = tmpRoot();
+      auto pf = root / "pad.json";
+      input::InputProfile p = input::InputProfile::makeDefault("xbox360");
+      check(p.saveFile(pf.string()).ok, "input-profile-save");
+      input::InputProfile q;
+      std::string err;
+      check(q.loadFile(pf.string(), err).ok, "input-profile-load", err);
+      check(q.version == 1 && q.mapping.bindings().size() == p.mapping.bindings().size(),
+            "input-profile-roundtrip");
+      check(q.validate().empty(), "input-profile-default-valid");
+      std::ofstream bf(pf, std::ios::binary | std::ios::trunc);
+      bf << "{\"input_profile_version\": 99}";
+      bf.close();
+      input::InputProfile bad;
+      check(!bad.loadFile(pf.string(), err).ok, "input-profile-bad-version-rejected", err);
+    }
+    // 18j. Conflicting bindings detected.
+    {
+      input::InputMapping m;
+      m.bindButton("jump", input::kBtnA);
+      m.bindButton("fire", input::kBtnA);
+      auto issues = m.validate();
+      bool found = false;
+      for (const auto& i : issues)
+        if (i.severity == "conflict") found = true;
+      check(found, "input-conflict-detected");
+      check(!m.missing({"jump", "start"}).empty(), "input-missing-detected");
+    }
+    // 18k. Missing controller: no fake data.
+    {
+      FakeBackend* fb = new FakeBackend();  // empty script => disconnected
+      input::InputProfile prof = input::InputProfile::makeDefault("pc");
+      std::unique_ptr<input::IInputBackend> be(fb);
+      input::ControllerManager mgr(std::move(be), prof, 0);
+      mgr.update(0);
+      const input::Frame& fr = mgr.frame();
+      check(!fr.connected && fr.buttons == 0 && fr.actions.empty(), "input-missing-honest");
+      // stateToJson carries the same honesty.
+      input::ControllerState st;
+      input::PollStatus ps = mgr.backend().poll(0, st);
+      check(ps == input::kDisconnected && !st.connected, "input-poll-disconnected");
+      json::Value j = input::stateToJson(st);
+      const json::Value* c = j.find("connected");
+      check(c && c->isBool() && !std::get<bool>(c->v), "input-state-json");
+    }
+    // 18l. Input analysis on synthetic sources + binary-only verdicts.
+    {
+      auto root = tmpRoot();
+      auto gd = root / "input-game";
+      std::error_code ec;
+      std::filesystem::create_directories(gd, ec);
+      std::ofstream src(gd / "player.cpp", std::ios::binary | std::ios::trunc);
+      src << "#include <windows.h>\nvoid tick(){ if (GetAsyncKeyState(65)) {} "
+             "if (XInputGetState(0,0)) {} }\n";
+      src.close();
+      Limits lim;
+      discovery::ScanResult scan = discovery::scanGameDir(gd.string(), lim);
+      std::vector<std::pair<std::string, analysis::PeInfo>> pes;
+      input::InputAnalysis a = input::analyzeInput(gd.string(), scan, pes, lim);
+      check(a.hasSources && a.findings.size() >= 2, "input-analyze-sources",
+            std::to_string(a.findings.size()));
+      bool kb = false, xi = false;
+      for (const auto& f : a.findings) {
+        if (f.system == "keyboard") kb = true;
+        if (f.system == "xinput") xi = true;
+      }
+      check(kb && xi, "input-analyze-systems");
+      check(a.mechanismVerdict.find("MAPPABLE") != std::string::npos, "input-analyze-verdict",
+            a.mechanismVerdict);
+      input::InputAnalysis b =
+          input::analyzeInput(gd.string(), discovery::ScanResult{}, pes, lim);
+      check(b.mechanismVerdict.find("UNKNOWN") != std::string::npos, "input-analyze-empty-honest");
+    }
+    // 18m. Live Windows backend loads (or honestly reports absence).
+    {
+      std::string note;
+      auto wb = input::createWindowsBackend(note);
+      if (wb) {
+        input::ControllerState st;
+        input::PollStatus ps = wb->poll(0, st);
+        check(ps == input::kOk || ps == input::kDisconnected, "input-winbackend-poll sane");
+        check(wb->caps().maxControllers == 4, "input-winbackend-caps");
+      } else {
+        check(!note.empty(), "input-winbackend-absent-honest", note);
+      }
+    }
   }
 
   std::cout << "tests passed: " << gPass << ", failed: " << gFail << "\n";

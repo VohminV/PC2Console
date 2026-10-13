@@ -37,3 +37,19 @@
 - Phase 5: сборка минимального XDK-сэмпла + `TEST_PLAN` железа (devkit/легитимная
   среда) — отдельный протокол после появления среды.
 - Сборка MSVC 14.51 (проверена MinGW 15.2; MSVC — следующий шаг).
+
+## Controller Compatibility (37 автотестов + живые прогоны, 2026-10-13)
+
+Авто (`pc2c test`): нормализация, radial/axial deadzone + граница, диагонали
+(кламп ≤1), инверсия, gamma-кривые, триггеры/порог, reconnect, rumble-unsupported,
+профили save/load/bad-version, конфликты, missing-controller, анализ источников,
+живой Windows-backend (poll sane, caps).
+Живые: `input backends` (xinput1_4.dll, SetState present), `input diag --seconds 3`
+(пада нет → честный `ever_connected=NO`, замер 64 Гц, ASCII-deadzone),
+`input analyze` на minplay (2 xinput-сайта, вердикт MAPPABLE),
+`input profile make-default/validate` (v1, 20 действий, 0 issues).
+XDK: `Xbox360Backend.cpp` компилируется XDK cl `/c` с 0 ошибок/варнингов;
+shared-заголовки dual-dialect (C++03-clean), что доказано Embedded-пробами
+диалекта (`enum class`/nested-namespace отвергнуты компилятором).
+Живой геймпад на ПК и rumble на консоли — за пользователем/железом
+(см. матрицу в `docs/CONTROLLER.md`).

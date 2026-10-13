@@ -36,15 +36,25 @@ ApiVerdict classifyDll(const std::string& dllLower, const std::string& target) {
   if (d == "user32.dll" || d == "gdi32.dll" || d == "comctl32.dll" || d == "comdlg32.dll" ||
       d == "shell32.dll" || d == "ole32.dll" || d == "oleaut32.dll" || d == "shlwapi.dll" ||
       d == "uxtheme.dll" || d == "dwmapi.dll")
-    return v("UNSUPPORTED", "Win32 windowing/shell has no Xbox 360 equivalent.",
-             "Remove or redesign UI around XUI/gamepad flow; needs source + design work.");
+    return v("UNSUPPORTED",
+             "Win32 windowing/shell has no Xbox 360 equivalent. This also covers "
+             "keyboard/mouse/window-message input: there is no mouse and no Win32 "
+             "keyboard-message pump on Xbox 360 (text entry goes through IME/virtual-keyboard "
+             "paths such as xime.h, not window messages).",
+             "Remove or redesign UI and ALL mouse/keyboard input around the gamepad (XInput2); "
+             "needs source + input-design work.");
   if (d == "ws2_32.dll" || d == "wininet.dll" || d == "winhttp.dll" || d == "dnsapi.dll")
     return v("REQUIRES_SOURCE", "Sockets differ (xnet/winsockx on Xbox 360).",
              "Port netcode to Xbox secure sockets; needs source + test console/service access.");
   if (d == "winmm.dll" || d == "dsound.dll" || d == "dmusic.dll" || d == "dinput8.dll" ||
       d == "dinput.dll")
-    return v("REQUIRES_SOURCE", "Legacy WinMM/DirectSound/DirectInput need XAudio2/XInput2 ports.",
-             "Needs source; map mixing/input to XAudio2/XInput2.");
+    return v("REQUIRES_SOURCE",
+             "Legacy WinMM/DirectSound/DirectInput need XAudio2/XInput2 ports. DirectInput "
+             "devices (incl. mouse/keyboard/joysticks) map to the XInput2 sample/getter model "
+             "(XInput2Sample + XInput2Get*, xinput2.lib/xinputremap.lib in XDK); there is no "
+             "1:1 mapping for mice.",
+             "Needs source; map gameplay input to XInput2 gamepad controls, drop mouse input, "
+             "redesign UI navigation.");
   if (contains(d, "d3d9") || d == "d3dx9_24.dll" || d == "d3dx9_25.dll" || d == "d3dx9_26.dll" ||
       d == "d3dx9_27.dll" || d == "d3dx9_28.dll" || d == "d3dx9_29.dll" || d == "d3dx9_30.dll" ||
       d == "d3dx9_31.dll" || d == "d3dx9_32.dll" || d == "d3dx9_33.dll" || d == "d3dx9_34.dll" ||
@@ -71,8 +81,14 @@ ApiVerdict classifyDll(const std::string& dllLower, const std::string& target) {
       d == "xaudio2_8.dll" || d == "xaudio2_9.dll" || d == "xapofx1_1.dll" ||
       d == "x3daudio1_0.dll" || d == "x3daudio1_7.dll") {
     if (xbox)
-      return v("CONVERTIBLE", "XInput/XAudio2 exist on Xbox 360 (xinput2/xaudio2 libs in XDK).",
-               "Adapt init/enumeration code; needs source.");
+      return v("CONVERTIBLE",
+               "PC XInput maps to Xbox 360 XInput (xbox.h: XInputGetState/SetState confirmed; "
+               "XINPUT_STATE/VIBRATION in xinputdefs.h; xinput2.lib/xinputremap.lib in XDK; "
+               "deadzones/triggers in xinputdefs.h). Classic GetState polling exists on 360, "
+               "plus the XInput2 sample model for exotic devices. XAudio2 exists on 360 "
+               "(xaudio2 libs in XDK).",
+               "Poll via XInputGetState + deadzones; remap device variety via xinputremap; "
+               "needs source + gamepad hardware test.");
     return v("REQUIRES_RESEARCH", "Sony equivalents differ; needs PS3 toolchain.",
              "Map to PS3 pad/audio APIs; needs source.");
   }
@@ -119,6 +135,14 @@ ApiVerdict classifyCpuArch(const std::string& arch, const std::string& target) {
     return v("REQUIRES_RESEARCH",
              "PowerPC code is closer but still needs XEX packaging, ABI and API adaptation.",
              "Verify object compatibility; repackage via imagexex; needs testing on hardware.");
+  if (arch == "xbox360")
+    return v(target == "xbox360" ? "SUPPORTED" : "REQUIRES_SOURCE",
+             target == "xbox360"
+                 ? "Xbox 360 machine code already (XDK link output); still needs XEX packaging, "
+                   "API review and hardware/executor verification."
+                 : "Xbox 360 machine code cannot run on PS3.",
+             target == "xbox360" ? "Package via imagexex; verify on test hardware."
+                                 : "Full recompile from source.");
   return v("UNKNOWN", "Unrecognized CPU architecture string: " + arch + ".",
            "Inspect binary headers manually.");
 }

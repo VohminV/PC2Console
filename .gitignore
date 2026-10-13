@@ -1,5 +1,7 @@
 build/
 out/
+samples/xbox360/minplay/Release/
+samples/xbox360/minplay/Debug/
 *.user
 *.suo
 .vs/
