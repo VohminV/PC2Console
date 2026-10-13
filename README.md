@@ -51,6 +51,8 @@ pc2c input diag [--user N] [--seconds S] [--rumble-test] [--format json]
 pc2c input analyze <dir> [--format json]
 pc2c input profile validate <file>
 pc2c input profile make-default --output <file> [--target xbox360]
+pc2c input torquescript <config.cs> --output <gamepad.cs> [--bind fn=CTRL ...]
+pc2c shaders convert <dir> --output <dir> [--profile sm1|sm2|sm3]
 ```
 
 Настольный backend читает XInput-геймпад (динамически, без жёсткой связи);

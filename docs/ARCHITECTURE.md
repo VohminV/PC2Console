@@ -32,7 +32,8 @@
 | `intermediate/` | Версионируемая модель (`pc2c_model_version: 1`): facts/assumptions/limitations |
 | `build/` | Диагностика XDK только по файловой системе (+ опциональный `--probe-tools`) |
 | `backends/` | `Xbox360Backend`, `Ps3Backend` (future, честно не готов) |
-| `input/` | Controller Compatibility: Types/Backend/Axis/Mapping/Profiles/Manager/Rumble/Diagnostics/Analyze + WindowsBackend (динамика XInput) + Xbox360Backend (XDK-only TU) |
+| `input/` | Controller Compatibility: Types/Backend/Axis/Mapping/Profiles/Manager/Rumble/Diagnostics/Analyze/TorqueGen + WindowsBackend (динамика XInput) + Xbox360Backend (XDK-only TU) |
+| `shaders/` | HLSL→Xbox микрокод через настоящий XDK fxc (stage из имени, отчёт JSON) |
 | `cli/` | Единый `pc2c`, все команды из ТЗ |
 | `test/` | Регрессии на синтетических фикстурах (генерируются в runtime, без бинарных блобов) |
 

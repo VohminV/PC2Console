@@ -24,9 +24,11 @@
 #include "pc2c/input/Manager.h"
 #include "pc2c/input/Profiles.h"
 #include "pc2c/input/StateJson.h"
+#include "pc2c/input/TorqueGen.h"
 #include "pc2c/input/WindowsBackend.h"
 #include "pc2c/portability/ApiDb.h"
 #include "pc2c/portability/Plan.h"
+#include "pc2c/shaders/ShaderConvert.h"
 
 namespace pc2c::test {
 namespace {
@@ -437,6 +439,14 @@ int RunAllTests(bool verbose) {
     check(classifyCpuArch("x86-64", "xbox360").category == "REQUIRES_SOURCE", "api-cpu-x64");
     check(classifyCpuArch("ppc", "xbox360").category == "REQUIRES_RESEARCH", "api-cpu-ppc");
     check(classifyCpuArch("xbox360", "xbox360").category == "SUPPORTED", "api-cpu-x360");
+    check(classifyDll("d3d8.dll", "xbox360").category == "REQUIRES_SOURCE", "api-d3d8");
+    check(classifyDll("wsock32.dll", "xbox360").category == "REQUIRES_SOURCE", "api-wsock");
+    {
+      std::vector<std::string> sigs = {"torque-candidate:a.dso", "torque-candidate:b.mis",
+                                       "torque-candidate:c.ter"};
+      EngineGuess g = guessEngine(sigs, {});
+      check(g.engine == "torque?", "api-torque-guess", g.engine + "/" + g.confidence);
+    }
   }
 
   // 14. SDK probe never crashes; backend honesty (ready=false in MVP).
@@ -705,18 +715,22 @@ int RunAllTests(bool verbose) {
       src << "#include <windows.h>\nvoid tick(){ if (GetAsyncKeyState(65)) {} "
              "if (XInputGetState(0,0)) {} }\n";
       src.close();
+      std::ofstream tcs(gd / "binds.cs", std::ios::binary | std::ios::trunc);
+      tcs << "new ActionMap(moveMap);\nmoveMap.bind(keyboard, \"w\", moveforward);\n";
+      tcs.close();
       Limits lim;
       discovery::ScanResult scan = discovery::scanGameDir(gd.string(), lim);
       std::vector<std::pair<std::string, analysis::PeInfo>> pes;
       input::InputAnalysis a = input::analyzeInput(gd.string(), scan, pes, lim);
       check(a.hasSources && a.findings.size() >= 2, "input-analyze-sources",
             std::to_string(a.findings.size()));
-      bool kb = false, xi = false;
+      bool kb = false, xi = false, tq = false;
       for (const auto& f : a.findings) {
         if (f.system == "keyboard") kb = true;
         if (f.system == "xinput") xi = true;
+        if (f.system == "torque") tq = true;
       }
-      check(kb && xi, "input-analyze-systems");
+      check(kb && xi && tq, "input-analyze-systems");
       check(a.mechanismVerdict.find("MAPPABLE") != std::string::npos, "input-analyze-verdict",
             a.mechanismVerdict);
       input::InputAnalysis b =
@@ -735,6 +749,117 @@ int RunAllTests(bool verbose) {
       } else {
         check(!note.empty(), "input-winbackend-absent-honest", note);
       }
+    }
+    // 18n. Shipped game profile (Canada Hunt): loads, validates, no conflicts.
+    {
+      std::filesystem::path anchor;
+      {
+        std::filesystem::path cur = std::filesystem::current_path();
+        for (int i = 0; i < 5 && anchor.empty(); ++i) {
+          if (std::filesystem::exists(cur / "profiles" / "canada_hunt_gamepad.json"))
+            anchor = cur;
+          else
+            cur = cur.parent_path();
+        }
+      }
+      if (anchor.empty()) {
+        std::cout << "[SKIP] canada-profile (profiles/ not found from test CWD)\n";
+      } else {
+        input::InputProfile g;
+        std::string err;
+        std::string pp =
+            (anchor / "profiles" / "canada_hunt_gamepad.json").string();
+        check(g.loadFile(pp, err).ok, "input-canada-load", err);
+        if (err.empty()) {
+          check(g.platform == "xbox360", "input-canada-platform", g.platform);
+          check(g.mapping.missing({"move", "camera", "fire"}).empty(), "input-canada-required");
+          auto iss = g.validate();
+          bool hard = false;
+          for (const auto& i : iss)
+            if (i.severity == "conflict") hard = true;
+          check(!hard, "input-canada-no-conflicts", std::to_string(iss.size()));
+        }
+      }
+    }
+  }
+
+  // 19. Source converters: shaders (dry-run, no fxc needed) + torquescript.
+  {
+    // 19a. Shader stage rules + dry-run conversion (hermetic).
+    {
+      auto root = tmpRoot();
+      auto sd = root / "shd";
+      std::error_code ec;
+      std::filesystem::create_directories(sd, ec);
+      writeBin(sd / "aV.hlsl", std::vector<std::uint8_t>{'x'});
+      writeBin(sd / "bP.hlsl", std::vector<std::uint8_t>{'y'});
+      writeBin(sd / "c.hlsl", std::vector<std::uint8_t>{'z'});
+      writeBin(sd / "inc.h", std::vector<std::uint8_t>{'w'});
+      shaders::ShaderOptions so;
+      so.dryRun = true;
+      Limits lim;
+      shaders::DirSummary s;
+      // dry-run never resolves fxc... it does not execute it either.
+      // (convertDir resolves fxc even for dry-run; accept env-dependent result:
+      // on machines without XDK this fails honestly.)
+      Status st = shaders::convertDir(sd.string(), (root / "shd-out").string(), so, lim, s);
+      if (st.ok) {
+        check(s.total == 4, "shader-dryrun-total", std::to_string(s.total));
+        int dry = 0, uns = 0;
+        for (const auto& f : s.files) {
+          if (f.status == "dry-run") {
+            dry++;
+            check(!f.profile.empty(), "shader-dryrun-profile", f.rel + "/" + f.profile);
+          }
+          if (f.status == "unsupported") uns++;
+        }
+        check(dry == 3, "shader-dryrun-staged", std::to_string(dry));
+        check(uns == 1, "shader-dryrun-unstaged", std::to_string(uns));
+      } else {
+        check(st.message.find("fxc") != std::string::npos, "shader-no-fxc-honest", st.message);
+      }
+      shaders::DirSummary rep;
+      rep.vsProfile = "vs_2_0";
+      rep.psProfile = "ps_2_0";
+      json::Value j = shaders::summaryToJson(rep);
+      const json::Value* t = j.find("total");
+      check(t && t->isInt(), "shader-report-json");
+    }
+    // 19b. TorqueScript parser + generator.
+    {
+      std::string cfg =
+          "moveMap.bindCmd(keyboard, \"a\", \"\", \"PSR_aim();\");\n"
+          "moveMap.bind(keyboard, \"f1\", PSR_quit_hunt);\n"
+          "moveMap.bind(mouse0, \"xaxis\", yaw);\n"
+          "moveMap.bindCmd(keyboard, \"w\", \"moveforward(1);\", \"stop();\");\n";
+      std::vector<input::TsBind> binds;
+      std::string err;
+      check(input::parseTsConfig(cfg, binds, err).ok, "ts-parse-ok", err);
+      check(binds.size() == 4, "ts-parse-count", std::to_string(binds.size()));
+      check(binds[0].device == "keyboard" && binds[0].make.empty() &&
+                binds[0].brk == "PSR_aim();",
+            "ts-parse-empty-make");
+      check(binds[2].key == "xaxis", "ts-parse-axis");
+      input::TsRule bad;
+      check(!input::parseTsRule("nope", bad, err), "ts-rule-rejected", err);
+      input::TsRule r1, r2, r3;
+      check(input::parseTsRule("PSR_aim:X", r1, err), "ts-rule-ok1", err);
+      check(input::parseTsRule("yaw=RX", r2, err), "ts-rule-ok2", err);
+      check(input::parseTsRule("moveforward:LY", r3, err), "ts-rule-ok3", err);
+      input::TsGenResult g =
+          input::generateGamepadCs("config.cs", binds, {r1, r2});
+      check(g.active == 2, "ts-gen-active", std::to_string(g.active));
+      check(g.csText.find("PSR_aim();") != std::string::npos, "ts-gen-verbatim");
+      check(g.csText.find("UNVERIFIED") != std::string::npos, "ts-gen-flagged");
+      check(g.csText.find("new ActionMap(gamepadMap);") != std::string::npos,
+            "ts-gen-actionmap");
+      check(g.report.find("mechanism_verdict") != nullptr, "ts-gen-verdict");
+      // key->axis shape change becomes a commented draft, never active code.
+      input::TsGenResult g2 =
+          input::generateGamepadCs("config.cs", binds, {r3});
+      check(g2.active == 0 && g2.drafts >= 1, "ts-gen-key-axis-draft");
+      check(!input::parseTsConfig("moveMap.bindCmd(keyboard, \"a\");\n", binds, err).ok,
+            "ts-parse-bad-rejected", err);
     }
   }
 

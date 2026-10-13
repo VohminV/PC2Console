@@ -69,6 +69,14 @@ const Token kTokens[] = {
     {"BindAction", "unreal", "Unreal input bindings: remap in DefaultInput.ini + code"},
     {"SetupPlayerInputComponent", "unreal", "Unreal input component: remap actions"},
     {"EKeys::", "unreal", "Unreal keys: remap to gamepad keys"},
+    // Torque engine (TorqueScript): verified on a 2009 TGEA title.
+    {"moveMap.bind", "torque", "Torque ActionMap: rebind keyboard/mouse actions to gamepad"},
+    {"moveMap.bindCmd", "torque", "Torque ActionMap command: rebind to gamepad"},
+    {"new ActionMap", "torque", "Torque ActionMap: define gamepad map alongside"},
+    {"GuiCanvas", "torque", "Torque GUI canvas: redesign for gamepad UI flow"},
+    {"$platform", "torque", "Torque platform var: check \"xenon\"/\"xbox\" branches"},
+    {"mouse0", "mouse", "Torque mouse device: NO console equivalent, redesign required"},
+    {"joystick", "joystick", "Joystick device: map to XInput gamepad slots"},
 };
 
 bool isSourceExt(const std::string& ext) {
@@ -165,11 +173,13 @@ InputAnalysis analyzeInput(const std::string& dir, const discovery::ScanResult& 
   }
 
   bool hasKb = false, hasMouse = false, hasDI = false, hasXI = false, hasOther = false;
+  bool hasTorque = false;
   for (const auto& f : a.findings) {
     if (f.system == "keyboard") hasKb = true;
     if (f.system == "mouse") hasMouse = true;
     if (f.system == "directinput") hasDI = true;
     if (f.system == "xinput") hasXI = true;
+    if (f.system == "torque") hasTorque = true;
     if (f.system == "sdl" || f.system == "unity" || f.system == "unreal") hasOther = true;
   }
   if (!a.hasSources && a.findings.empty()) {
@@ -186,7 +196,7 @@ InputAnalysis analyzeInput(const std::string& dir, const discovery::ScanResult& 
     a.mechanismVerdict =
         "REQUIRES_REDESIGN: mouse input has no Xbox 360 equivalent; keyboard/directinput parts "
         "are mappable once action sites are confirmed in source.";
-  } else if (hasXI || hasDI || hasKb || hasOther) {
+  } else if (hasXI || hasDI || hasKb || hasOther || hasTorque) {
     a.mechanismVerdict =
         "MAPPABLE: input layer identified in source; integrate ControllerManager at the "
         "confirmed action sites (binding map draft above), preserving handlers.";

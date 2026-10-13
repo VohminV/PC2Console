@@ -55,6 +55,19 @@ ApiVerdict classifyDll(const std::string& dllLower, const std::string& target) {
              "1:1 mapping for mice.",
              "Needs source; map gameplay input to XInput2 gamepad controls, drop mouse input, "
              "redesign UI navigation.");
+  if (d == "d3d8.dll" || contains(d, "d3d8"))
+    return v("REQUIRES_SOURCE",
+             "Direct3D 8 has no Xbox 360 counterpart; the D3D8 render path must move to "
+             "D3D9-class (verified XDK/reference: Canada_Hunt.exe imports Direct3DCreate8 "
+             "while its log shows GFXD3D9Device active — engine GFX layer decides).",
+             "Port/upgrade the engine GFX device to D3D9-class; recompile shaders; needs source.");
+  if (d == "imm32.dll")
+    return v("REQUIRES_SOURCE", "IME composition API differs on console (cf. xime.h).",
+             "Review text-entry sites; needs source.");
+  if (d == "wsock32.dll" || d == "ws2_32.dll" || d == "wininet.dll" || d == "winhttp.dll" ||
+      d == "dnsapi.dll")
+    return v("REQUIRES_SOURCE", "Sockets differ (xnet/winsockx on Xbox 360).",
+             "Port netcode to Xbox secure sockets; needs source + test console/service access.");
   if (contains(d, "d3d9") || d == "d3dx9_24.dll" || d == "d3dx9_25.dll" || d == "d3dx9_26.dll" ||
       d == "d3dx9_27.dll" || d == "d3dx9_28.dll" || d == "d3dx9_29.dll" || d == "d3dx9_30.dll" ||
       d == "d3dx9_31.dll" || d == "d3dx9_32.dll" || d == "d3dx9_33.dll" || d == "d3dx9_34.dll" ||
@@ -177,9 +190,16 @@ EngineGuess guessEngine(const std::vector<std::string>& signals,
   int unreal = (hasSig("unreal") ? 2 : 0) + (hasDll("unreal") ? 3 : 0);
   int cry = (hasSig("cryengine") ? 2 : 0) + (hasDll("cry") ? 2 : 0);
   int xna = (hasDll("xna") ? 3 : 0) + (hasSig("xaudio") || hasSig("d3d") ? 1 : 0);
+  int torque = (hasSig("torque-candidate:") ? 2 : 0);
+  // Count distinct torque-candidate files (capped influence).
+  int torqueFiles = 0;
+  for (const auto& s : signals)
+    if (s.find("torque-candidate:") != std::string::npos && ++torqueFiles >= 3) break;
+  if (torqueFiles >= 3) torque += 2;
   if (unity >= 3) return {"unity?", "medium", "unityplayer/managed/_data signals"};
   if (unreal >= 3) return {"unreal-engine?", "medium", "unreal/core signals"};
   if (cry >= 3) return {"cryengine?", "medium", "cry signals"};
+  if (torque >= 3) return {"torque?", "medium", "torque artifacts (.dso/.mis/.ter/.dif/.dts)"};
   if (xna >= 3) return {"xna-framework?", "low", "xna/ms-stack signals"};
   if (hasSig("havok") || hasSig("physx")) return {"custom-or-licensed (havok/physx mw)", "low", "middleware signals"};
   if (!signals.empty()) return {"custom?", "low", "weak filename signals only"};

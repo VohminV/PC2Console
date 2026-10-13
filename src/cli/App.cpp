@@ -19,8 +19,10 @@
 #include "pc2c/input/Diagnostics.h"
 #include "pc2c/input/Manager.h"
 #include "pc2c/input/Profiles.h"
+#include "pc2c/input/TorqueGen.h"
 #include "pc2c/input/WindowsBackend.h"
 #include "pc2c/input/Xbox360Backend.h"
+#include "pc2c/shaders/ShaderConvert.h"
 #include "pc2c/intermediate/Model.h"
 #include "pc2c/portability/Plan.h"
 #include "pc2c/test/Suite.h"
@@ -50,6 +52,9 @@ void usage() {
                "  pc2c input diag [--user N] [--seconds S] [--rumble-test] [--format json]\n"
                "  pc2c input analyze <dir> [--format json] [--output file.json]\n"
                "  pc2c input profile validate <file> | make-default --output <file>\n"
+               "  pc2c input torquescript <config.cs> --output <gamepad.cs> [--bind fn=CTRL ...]\n"
+               "  pc2c shaders convert <dir> --output <dir> [--profile sm1|sm2|sm3]\n"
+               "       [--overwrite] [--dry-run] [--format json]\n"
                "  pc2c test [--verbose]\n"
                "\nGlobal flags: --input --output --target --profile --max-texture-size\n"
                "  --dry-run --overwrite --verbose --format text|json\n"
@@ -66,6 +71,7 @@ struct Parsed {
   int inputUser = 0;
   double inputSeconds = 5.0;
   bool inputRumbleTest = false;
+  std::vector<std::string> inputBinds;  // repeated --bind fn=CONTROL
   bool help = false;
   std::string error;
 };
@@ -100,6 +106,10 @@ Parsed parseArgs(const std::vector<std::string>& a) {
       p.opts.probeTools = true;
     } else if (t == "--rumble-test") {
       p.inputRumbleTest = true;
+    } else if (t.rfind("--bind", 0) == 0) {
+      std::string v;
+      if (!needVal(t, v)) return p;
+      p.inputBinds.push_back(v);
     } else if (t.rfind("--user", 0) == 0) {
       std::string v;
       if (!needVal(t, v)) return p;
@@ -153,6 +163,8 @@ Parsed parseArgs(const std::vector<std::string>& a) {
     } else if (p.cmd == "assets" && p.sub.empty()) {
       p.sub = t;
     } else if (p.cmd == "input" && p.sub.empty()) {
+      p.sub = t;
+    } else if (p.cmd == "shaders" && p.sub.empty()) {
       p.sub = t;
     } else if (p.cmd == "backends" && p.sub.empty()) {
       p.sub = t;
@@ -677,6 +689,48 @@ int cmdReport(const Parsed& p, const Limits& lim) {
   return emitJson(m.toJson(), p.opts.output);
 }
 
+int cmdShaders(const Parsed& p, const Limits& lim) {
+  using namespace pc2c;
+  using namespace pc2c::shaders;
+  if (p.sub != "convert") {
+    std::cerr << "error: usage: pc2c shaders convert <dir> --output <dir> [--profile sm1|sm2|sm3]\n";
+    return 1;
+  }
+  std::string dir = positionalOrInput(p);
+  if (dir.empty() || p.opts.output.empty()) {
+    std::cerr << "error: usage: pc2c shaders convert <dir> --output <dir> [--profile sm1|sm2|sm3]\n";
+    return 1;
+  }
+  std::string sm = p.opts.profile.empty() ? "sm2" : p.opts.profile;
+  ShaderOptions so;
+  so.overwrite = p.opts.overwrite;
+  so.dryRun = p.opts.dryRun;
+  if (sm == "sm1") {
+    so.vsProfile = "vs_1_1";
+    so.psProfile = "ps_1_1";
+  } else if (sm == "sm2") {
+    so.vsProfile = "vs_2_0";
+    so.psProfile = "ps_2_0";
+  } else if (sm == "sm3") {
+    so.vsProfile = "vs_3_0";
+    so.psProfile = "ps_3_0";
+  } else {
+    std::cerr << "error: unknown shader profile '" << sm << "' (sm1|sm2|sm3)\n";
+    return 1;
+  }
+  DirSummary s;
+  Status st = convertDir(dir, p.opts.output, so, lim, s);
+  if (p.opts.format == "json" || !st.ok) {
+    int rc = emitJson(summaryToJson(s), "");
+    if (!st.ok) std::cerr << "error: " << st.message << "\n";
+    return st.ok ? rc : 1;
+  }
+  std::cout << "shaders total=" << s.total << " compiled=" << s.compiled << " skipped=" << s.skipped
+            << " failed=" << s.failed << " unsupported=" << s.unsupported << "\n";
+  std::cout << "report: " << s.reportPath << "\n";
+  return 0;
+}
+
 int cmdInput(const Parsed& p, const Limits& lim) {
   using namespace pc2c;
   using namespace pc2c::input;
@@ -836,6 +890,47 @@ int cmdInput(const Parsed& p, const Limits& lim) {
     std::cerr << "error: unknown profile action '" << p.positionals[0] << "'\n";
     return 1;
   }
+  if (p.sub == "torquescript") {
+    std::string cfg = positionalOrInput(p);
+    if (cfg.empty() || p.opts.output.empty()) {
+      std::cerr << "error: usage: pc2c input torquescript <config.cs> --output <gamepad.cs> "
+                   "[--bind fn=CONTROL ...]\n";
+      return 1;
+    }
+    std::vector<std::uint8_t> raw;
+    Status rs = fs::readFileBounded(cfg, raw, 2ULL * 1024 * 1024);
+    if (!rs.ok) {
+      std::cerr << "error: " << rs.message << "\n";
+      return 1;
+    }
+    std::vector<TsBind> binds;
+    std::string err;
+    if (!parseTsConfig(std::string(raw.begin(), raw.end()), binds, err).ok) {
+      std::cerr << "error: " << err << "\n";
+      return 1;
+    }
+    std::vector<TsRule> rules;
+    for (const auto& b : p.inputBinds) {
+      TsRule rl;
+      if (!parseTsRule(b, rl, err)) {
+        std::cerr << "error: " << err << "\n";
+        return 1;
+      }
+      rules.push_back(rl);
+    }
+    TsGenResult g = generateGamepadCs(cfg, binds, rules);
+    Status ws = fs::atomicWriteFile(p.opts.output, g.csText);
+    if (!ws.ok) {
+      std::cerr << "error: " << ws.message << "\n";
+      return 1;
+    }
+    if (p.opts.format == "json") return emitJson(g.report, "");
+    std::cout << "binds parsed=" << binds.size() << " active=" << g.active
+              << " drafts=" << g.drafts << " warnings=" << g.warnings.size() << "\n";
+    for (const auto& w : g.warnings) std::cout << "  warn: " << w << "\n";
+    std::cout << "wrote " << p.opts.output << " (REVIEW DRAFT, mechanism unproven)\n";
+    return 0;
+  }
   std::cerr << "error: unknown input subcommand '" << p.sub
             << "' (backends|diag|analyze|profile)\n";
   return 1;
@@ -863,6 +958,7 @@ int Pc2cMain(const std::vector<std::string>& args) {
   if (p.cmd == "inventory") return cmdInventory(p, lim);
   if (p.cmd == "assets") return cmdAssets(p, lim);
   if (p.cmd == "input") return cmdInput(p, lim);
+  if (p.cmd == "shaders") return cmdShaders(p, lim);
   if (p.cmd == "plan") return cmdPlan(p, lim);
   if (p.cmd == "build") return cmdBuild(p);
   if (p.cmd == "report") return cmdReport(p, lim);

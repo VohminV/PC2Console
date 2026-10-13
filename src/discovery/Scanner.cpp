@@ -125,6 +125,11 @@ void maybeEngineSignal(const std::string& relLower, std::vector<std::string>& ou
   if (has("xna") || has("xaudio") || has("d3d")) out.push_back("ms-stack:" + relLower);
   if (has("sdl") || has("openal") || has("ogg") || has("vorbis"))
     out.push_back("open-stack:" + relLower);
+  // Torque engine artifacts (verified on a 2009 TGEA title: .dso compiled
+  // scripts, .mis missions, .ter terrains, .dif interiors, .dts shapes).
+  if (has(".dso") || has(".mis") || has(".ter") || has(".dif") || has(".dts") ||
+      has("scriptsandassets") || has("torque"))
+    out.push_back("torque-candidate:" + relLower);
 }
 
 }  // namespace

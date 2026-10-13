@@ -36,11 +36,13 @@ set(PC2C_LIB_SOURCES
   src/input/Manager.cpp
   src/input/Diagnostics.cpp
   src/input/Analyze.cpp
+  src/input/TorqueGen.cpp
   src/input/backends/WindowsBackend.cpp
   src/intermediate/Model.cpp
   src/build/Toolchain.cpp
   src/backends/Backend.cpp
   src/backends/Targets.cpp
+  src/shaders/ShaderConvert.cpp
   src/cli/App.cpp
   src/test/Suite.cpp
 )

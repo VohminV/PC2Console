@@ -28,7 +28,14 @@ pc2c input diag [--user N] [--seconds S] [--rumble-test] [--format json]
 pc2c input analyze <dir> [--format json]
 pc2c input profile validate <file>
 pc2c input profile make-default --output <file> [--target xbox360]
+pc2c input torquescript <config.cs> --output <gamepad.cs> [--bind fn=CTRL ...]
 ```
+
+TorqueScript-конвертер сохраняет функции игры дословно, меняет только
+device+object; key→axis превращается в закомментированный драфт;
+имена joystick-устройств помечены UNVERIFIED (kJoyTable v1), вердикт — UNPROVEN
+до подтверждения движкового пути. Проверено на Canada Hunt: 12 активных,
+2 драфта.
 
 ## Профиль (v1)
 
